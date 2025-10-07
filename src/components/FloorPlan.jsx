@@ -17,12 +17,12 @@ const BOX_W = RANGE; // X width
 const BOX_D = RANGE; // Z depth
 const BOX_H = 1.0;       // Y height to make it easy to click
 const POP_Y = 0.25;      // lift for popup over floor
-const LABEL_DF = 28;     // Html distanceFactor (bigger => smaller on screen)
+const LABEL_DF = 10;     // Html distanceFactor (bigger => smaller on screen)
 // ---------------------------------------------------------------
 
 const fmt = (n) => (Math.abs(n) < 1e-3 ? "0.000" : n.toFixed(3));
 
-function ClickHotspot({ id, pos, color = STATUS_COLOR.DEFAULT, selectedId, setSelected }) {
+function ClickHotspot({ id, pos, color = STATUS_COLOR.DEFAULT, selectedId, setSelected, onPick }) {
     const [x, y, z] = pos;
     const isActive = selectedId === id;
 
@@ -35,6 +35,7 @@ function ClickHotspot({ id, pos, color = STATUS_COLOR.DEFAULT, selectedId, setSe
                     e.stopPropagation();
                     // toggle if clicking the same, otherwise select this room
                     setSelected((curr) => (curr === id ? null : id));
+                    onPick && onPick({ x, y, z, name: id });
                 }}
             >
                 <boxGeometry args={[BOX_W, BOX_H, BOX_D]} />
@@ -70,6 +71,13 @@ export default function FloorPlan() {
     const [label, setLabel] = useState("4th floor");
     const url = FLOORS[label];
     const rooms = ROOMS[label] ?? [];
+    const [pick, setPick] = useState(null);
+    const pickText = useMemo(() => {
+        if (!pick) return "Click the model to read coordinates…";
+        const { x, y, z, name } = pick;
+        return `${name ?? "(unnamed)"}  |  x:${fmt(x)}, y:${fmt(y)}, z:${fmt(z)}`;
+    }, [pick]);
+
 
     // which room's popup is currently selected (clicked)
     const [selectedId, setSelectedId] = useState(null);
@@ -102,6 +110,20 @@ export default function FloorPlan() {
                 ))}
             </div>
 
+            {/*Top left text box*/}
+            <div
+                style={{
+                    position: "absolute", top: 12, left: 12, zIndex: 20,
+                    padding: "10px 12px", color: "#fff",
+                    background: "rgba(0,0,0,0.55)",
+                    border: "1px solid rgba(255,255,255,0.4)",
+                    borderRadius: 8, fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+                    fontSize: 13, whiteSpace: "pre", userSelect: "text",
+                }}
+            >
+                {pickText}
+            </div>
+
             <Canvas
                 camera={{ position: [0, 9, 12], near: 0.01, far: 500 }}
                 // Click empty space to clear any active popup
@@ -112,7 +134,15 @@ export default function FloorPlan() {
 
                 <Suspense fallback={null}>
                     <Bounds fit clip observe margin={1}>
-                        <FloorplanModel key={url} url={url} />
+                        <group
+                            onPointerDown={(e) => {
+                                e.stopPropagation();
+                                const p = e.point;
+                                setPick({ x: p.x, y: p.y, z: p.z, name: e.object?.name });
+                            }}
+                        >
+                            <FloorplanModel key={url} url={url} />
+                        </group>
                     </Bounds>
 
                     {/* One clickable hotspot per room coordinate */}
@@ -124,6 +154,7 @@ export default function FloorPlan() {
                             color={STATUS_COLOR?.DEFAULT ?? "rgba(0,0,0,0.75)"}
                             selectedId={selectedId}
                             setSelected={setSelectedId}
+                            onPick={setPick}
                         />
                     ))}
 
