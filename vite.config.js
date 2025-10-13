@@ -12,6 +12,12 @@ export default defineConfig({
                 changeOrigin: true,
                 secure: false,
             },
+            '/predict':{
+                target: 'http://localhost:5069/api',
+                changeOrigin: true,
+                secure: false,
+            }
+
         },
     }
 })

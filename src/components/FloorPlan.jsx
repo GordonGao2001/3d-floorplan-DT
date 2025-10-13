@@ -3,9 +3,10 @@ import React, { useState, useMemo, useEffect, Suspense } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Bounds, Html } from "@react-three/drei";
 import FloorplanModel from "../jsx_model/FloorplanModel";
+import PredictionPanel from "../components/PredictionPanel.jsx";
 import { ROOMS, STATUS_COLOR } from "../data/rooms";
 
-/* ----------------------------- config ----------------------------- */
+/* ========================= Config ========================= */
 const FLOORS = {
     "4th floor": "/models/floorplan_4th.glb",
     "5th floor": "/models/floorplan_5th.glb",
@@ -13,9 +14,17 @@ const FLOORS = {
     "7th floor": "/models/floorplan_7th.glb",
 };
 const SENSORS = ["co2", "humidity", "light", "motion", "temperature"];
+const SENSOR_COLORS = {
+    co2: "#60a5fa",
+    humidity: "#34d399",
+    light: "#fbbf24",
+    motion: "#f97316",
+    temperature: "#ef4444",
+};
 
 const fmt = (n) => (Math.abs(n) < 1e-3 ? "0.000" : n.toFixed(3));
 const fmtTime = (t) => new Date(t).toLocaleString();
+
 function floorToCode(label) {
     switch (label) {
         case "4th floor": return "F_4";
@@ -25,6 +34,7 @@ function floorToCode(label) {
         default: return null;
     }
 }
+
 function roomOverallRange(roomObj) {
     if (!roomObj) return null;
     let minStart = Infinity, maxEnd = -Infinity;
@@ -37,23 +47,37 @@ function roomOverallRange(roomObj) {
     if (!isFinite(minStart) || !isFinite(maxEnd)) return null;
     return [minStart, maxEnd];
 }
+
 // Date -> "YYYY-MM-DD HH:mm:ss"
 function toSqlish(d) {
     const pad = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-/* ------- clickable hotspots around coordinates (±RANGE on X/Z) ----- */
+/* ============ Clickable room hotspots (small floating label) ============ */
 const RANGE = 0.35;
 const BOX_W = RANGE * 2;
 const BOX_D = RANGE * 2;
 const BOX_H = 1.0;
-const POP_Y = 0.25;
-const LABEL_DF = 28;
+const POP_Y = 0.22;
+const LABEL_DF = 40;
 
-function ClickHotspot({ id, pos, color, selectedId, setSelected }) {
+function ClickHotspot({
+                          id, pos, color, selectedId, setSelected,
+                          selectedSensor, currentPoint,
+                      }) {
     const [x, y, z] = pos;
     const isActive = selectedId === id;
+    const labelColor = selectedSensor ? (SENSOR_COLORS[selectedSensor] || color) : color;
+
+    let brief = `Room ${id}`;
+    if (selectedSensor && currentPoint) {
+        const sName = selectedSensor.toUpperCase();
+        const last  = currentPoint.last ?? currentPoint.avg ?? currentPoint.max ?? currentPoint.min ?? "—";
+        brief = `Room ${id} — ${sName}: ${last}`;
+    } else if (selectedSensor && !currentPoint) {
+        brief = `Room ${id} — ${selectedSensor.toUpperCase()}: (no data)`;
+    }
 
     return (
         <group>
@@ -72,19 +96,19 @@ function ClickHotspot({ id, pos, color, selectedId, setSelected }) {
                 <Html position={[x, y + POP_Y, z]} center distanceFactor={LABEL_DF} zIndexRange={[15, 25]}>
                     <div
                         style={{
-                            padding: "4px 6px",
-                            fontSize: 11,
+                            padding: "3px 6px",
+                            fontSize: 10,
                             color: "#fff",
-                            background: color,
+                            background: labelColor,
                             border: "1px solid rgba(255,255,255,0.5)",
                             borderRadius: 4,
-                            boxShadow: "0 3px 10px rgba(0,0,0,0.30)",
+                            boxShadow: "0 2px 8px rgba(0,0,0,0.28)",
                             whiteSpace: "nowrap",
                             pointerEvents: "none",
+                            fontWeight: 700,
                         }}
-                        title={`x:${x.toFixed(3)} y:${y.toFixed(3)} z:${z.toFixed(3)}`}
                     >
-                        Room {id} — x:{fmt(x)} y:{fmt(y)} z:{fmt(z)}
+                        {brief}
                     </div>
                 </Html>
             )}
@@ -92,13 +116,13 @@ function ClickHotspot({ id, pos, color, selectedId, setSelected }) {
     );
 }
 
-/* --------------------------- main component ------------------------ */
+/* =========================== Main component =========================== */
 export default function FloorPlan() {
     const [label, setLabel] = useState("4th floor");
     const url = FLOORS[label];
     const rooms = ROOMS[label] ?? [];
 
-    // top-left coordinate readout
+    // top-left coordinates readout
     const [pick, setPick] = useState(null);
     const pickText = useMemo(() => {
         if (!pick) return "Click the model to read coordinates…";
@@ -106,20 +130,27 @@ export default function FloorPlan() {
         return `${name ?? "(unnamed)"}  |  x:${fmt(x)}  y:${fmt(y)}  z:${fmt(z)}`;
     }, [pick]);
 
-    // selection + replay UI
+    // mode toggle
+    const [mode, setMode] = useState("replay"); // 'replay' | 'prediction'
+
+    // selection (room)
     const [selectedId, setSelectedId] = useState(null);
-    const [replayOn, setReplayOn] = useState(true); // keep ON if you want this always visible
+
+    /* ---------------------------- REPLAY STATE ---------------------------- */
+    const replayOn = mode === "replay";
     const floorCode = floorToCode(label);
 
-    // floor ranges (used to request room series window)
-    const [ranges, setRanges] = useState(null);
+    const [ranges, setRanges] = useState(null);        // /twin/history/F_X
+    const [selectedSensor, setSelectedSensor] = useState(null);
+    const [series, setSeries] = useState(null);        // array of points for chosen sensor
+    const [curIdx, setCurIdx] = useState(0);
+    const currentPoint = useMemo(() => {
+        if (!series || !series.length) return null;
+        const i = Math.min(Math.max(curIdx, 0), series.length - 1);
+        return series[i];
+    }, [series, curIdx]);
 
-    // sensor choice + fetched series for that sensor
-    const [selectedSensor, setSelectedSensor] = useState(null);     // 'co2' | 'humidity' | ...
-    const [series, setSeries] = useState(null);                     // array of points for chosen sensor
-    const [curIdx, setCurIdx] = useState(0);                        // slider index into series
-
-    /* 1) Fetch floor ranges when Replay is ON or floor changes (drives window for room series) */
+    // fetch floor ranges for slider window (only when in replay)
     useEffect(() => {
         if (!replayOn || !floorCode) return;
         setRanges(null);
@@ -130,53 +161,50 @@ export default function FloorPlan() {
         fetch(`/twin/history/${floorCode}`)
             .then((r) => r.json())
             .then((data) => setRanges(data.range || {}))
-            .catch((err) => {
-                console.error("history fetch failed:", err);
-                setRanges({});
-            });
+            .catch((err) => { console.error("ranges error", err); setRanges({}); });
     }, [replayOn, floorCode]);
 
-    /* 2) When a room is selected, reset sensor/series/slider */
+    // reset sensor/series when room changes (replay)
     useEffect(() => {
+        if (!replayOn) return;
         setSelectedSensor(null);
         setSeries(null);
         setCurIdx(0);
-    }, [selectedId]);
+    }, [selectedId, replayOn]);
 
-    /* 3) After sensor chosen, fetch full series once (agg=1&sensor=...) */
+    // resolve API room key leniently
+    function resolveRoomKey(rangesObj, id) {
+        if (!rangesObj || !id) return null;
+        const wantA = `R_${id}`.toLowerCase();
+        const wantB = `${id}`.toLowerCase();
+        return Object.keys(rangesObj).find(
+            (k) => k.toLowerCase() === wantA || k.toLowerCase() === wantB
+        ) || null;
+    }
+
+    // fetch full sensor series once after sensor chosen (replay)
     useEffect(() => {
         if (!replayOn || !ranges || !selectedId || !selectedSensor) return;
-        const roomKey = `R_${selectedId}`;
-        const span = roomOverallRange(ranges[roomKey]);
-        if (!span) { setSeries([]); return; }
+
+        const rk = resolveRoomKey(ranges, selectedId);
+        const span = roomOverallRange(ranges[rk]);
+        if (!rk || !span) { setSeries([]); return; }
 
         const [minT, maxT] = span;
         const from = toSqlish(new Date(minT));
         const to   = toSqlish(new Date(maxT));
-        const url  = `/twin/rooms/${floorCode}/${roomKey}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&agg=1&sensor=${encodeURIComponent(selectedSensor)}`;
+        const url  = `/twin/rooms/${floorCode}/${rk}/history?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&agg=1&sensor=${encodeURIComponent(selectedSensor)}`;
 
         setSeries(null);
         setCurIdx(0);
 
         fetch(url)
             .then((r) => r.json())
-            .then((j) => {
-                const arr = j?.series || [];
-                setSeries(arr);
-                setCurIdx(arr.length ? 0 : 0);
-            })
-            .catch((e) => {
-                console.error("room sensor history fetch failed:", e);
-                setSeries([]);
-            });
+            .then((j) => { setSeries(Array.isArray(j?.series) ? j.series : []); })
+            .catch((e) => { console.error("series error", e); setSeries([]); });
     }, [replayOn, ranges, selectedId, selectedSensor, floorCode]);
 
-    const currentPoint = useMemo(() => {
-        if (!series || !series.length) return null;
-        const i = Math.min(Math.max(curIdx, 0), series.length - 1);
-        return series[i];
-    }, [series, curIdx]);
-
+    /* -------------------------- UI LAYOUT -------------------------- */
     return (
         <div className="h-screen w-screen bg-[#030d30] relative">
             {/* top-left coordinate readout */}
@@ -192,7 +220,78 @@ export default function FloorPlan() {
                 {pickText}
             </div>
 
-            {/* sensor picker (appears when a room is selected) */}
+            {/* top-center: MODE TOGGLER */}
+            <div
+                style={{
+                    position: "absolute",
+                    top: 12,
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    zIndex: 20,
+                    display: "flex",
+                    gap: 0,
+                    background: "rgba(0,0,0,0.5)",
+                    border: "1px solid rgba(255,255,255,0.45)",
+                    borderRadius: 999,
+                    overflow: "hidden",
+                }}
+            >
+                <button
+                    onClick={() => setMode("replay")}
+                    style={{
+                        padding: "8px 16px",
+                        color: "#fff",
+                        background: mode === "replay" ? "rgba(255,255,255,0.18)" : "transparent",
+                        border: "none",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                    }}
+                >
+                    Replay
+                </button>
+                <button
+                    onClick={() => setMode("prediction")}
+                    style={{
+                        padding: "8px 16px",
+                        color: "#fff",
+                        background: mode === "prediction" ? "rgba(255,255,255,0.18)" : "transparent",
+                        border: "none",
+                        cursor: "pointer",
+                        fontWeight: 700,
+                    }}
+                >
+                    Prediction
+                </button>
+            </div>
+
+            {/* top-right: floor buttons */}
+            <div className="absolute top-3 right-3 z-10 flex gap-6">
+                {Object.keys(FLOORS).map((name) => (
+                    <button
+                        key={name}
+                        onClick={() => {
+                            setLabel(name);
+                            setSelectedId(null);
+                            setPick(null);
+                            // replay state will refetch if in replay mode
+                            setSeries(null);
+                            setSelectedSensor(null);
+                            setRanges(null);
+                            setCurIdx(0);
+                        }}
+                        style={{
+                            padding: "12px 20px", fontSize: 14, lineHeight: 1.0, color: "#fff",
+                            background: name === label ? "rgba(0,0,0,0.7)" : "rgba(0,0,0,0.45)",
+                            border: "1px solid rgba(255,255,255,0.45)", borderRadius: 10,
+                            cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
+                        }}
+                    >
+                        {name}
+                    </button>
+                ))}
+            </div>
+
+            {/* REPLAY: sensor picker */}
             {replayOn && selectedId && (
                 <div
                     style={{
@@ -220,7 +319,7 @@ export default function FloorPlan() {
                                     padding: "6px 10px",
                                     borderRadius: 8,
                                     border: "1px solid rgba(255,255,255,0.5)",
-                                    background: selectedSensor === s ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.35)",
+                                    background: selectedSensor === s ? SENSOR_COLORS[s] : "rgba(0,0,0,0.35)",
                                     color: "#fff",
                                     cursor: "pointer",
                                 }}
@@ -232,12 +331,12 @@ export default function FloorPlan() {
                 </div>
             )}
 
-            {/* dynamic data box (appears after sensor is chosen) */}
+            {/* REPLAY: dynamic data box */}
             {replayOn && selectedId && selectedSensor && (
                 <div
                     style={{
                         position: "absolute",
-                        top: 116, // below the picker
+                        top: 116,
                         left: 12,
                         zIndex: 20,
                         maxHeight: 260,
@@ -258,45 +357,27 @@ export default function FloorPlan() {
                         <div>no {selectedSensor} data for room {selectedId}</div>
                     ) : (
                         <>
-                            <div style={{ fontWeight: 700, marginBottom: 6 }}>
-                                {selectedSensor.toUpperCase()} @ {currentPoint.t} (R_{selectedId})
+                            <div
+                                style={{
+                                    fontWeight: 700,
+                                    marginBottom: 6,
+                                    background: SENSOR_COLORS[selectedSensor],
+                                    padding: "4px 6px",
+                                    borderRadius: 6,
+                                }}
+                            >
+                                {selectedSensor.toUpperCase()} @ {series[curIdx]?.t} (R_{selectedId})
                             </div>
-                            {"avg" in currentPoint && <div>avg: {currentPoint.avg}</div>}
-                            {"min" in currentPoint && <div>min: {currentPoint.min}</div>}
-                            {"max" in currentPoint && <div>max: {currentPoint.max}</div>}
-                            {"last" in currentPoint && <div>last: {currentPoint.last}</div>}
+                            {"avg" in (series[curIdx] || {}) && <div>avg: {series[curIdx].avg}</div>}
+                            {"min" in (series[curIdx] || {}) && <div>min: {series[curIdx].min}</div>}
+                            {"max" in (series[curIdx] || {}) && <div>max: {series[curIdx].max}</div>}
+                            {"last" in (series[curIdx] || {}) && <div>last: {series[curIdx].last}</div>}
                         </>
                     )}
                 </div>
             )}
 
-            {/* top-right: floor buttons */}
-            <div className="absolute top-3 right-3 z-10 flex gap-6">
-                {Object.keys(FLOORS).map((name) => (
-                    <button
-                        key={name}
-                        onClick={() => {
-                            setLabel(name);
-                            setSelectedId(null);
-                            setPick(null);
-                            setRanges(null);
-                            setSelectedSensor(null);
-                            setSeries(null);
-                            setCurIdx(0);
-                        }}
-                        style={{
-                            padding: "12px 20px", fontSize: 14, lineHeight: 1.0, color: "#fff",
-                            background: name === label ? "rgba(0,0,0,0.7)" : "rgba(0,0,0,0.45)",
-                            border: "1px solid rgba(255,255,255,0.45)", borderRadius: 10,
-                            cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
-                        }}
-                    >
-                        {name}
-                    </button>
-                ))}
-            </div>
-
-            {/* bottom-center: slider indexes the sensor series */}
+            {/* REPLAY: bottom slider */}
             {replayOn && selectedId && selectedSensor && (
                 <div
                     style={{
@@ -345,6 +426,21 @@ export default function FloorPlan() {
                 </div>
             )}
 
+            {/* PREDICTION mode UI */}
+            {mode === "prediction" && selectedId ? (
+                <PredictionPanel floorCode={floorCode} roomKey={`R_${selectedId}`} />
+            ) : mode === "prediction" ? (
+                <div style={{
+                    position: "absolute", top: 52, left: 12, zIndex: 20,
+                    padding: "10px 12px", background: "rgba(0,0,0,0.55)",
+                    border: "1px solid rgba(255,255,255,0.4)", borderRadius: 8,
+                    color: "#fff", fontSize: 12
+                }}>
+                    Pick a room to run predictions.
+                </div>
+            ) : null}
+
+            {/* 3D scene */}
             <Canvas camera={{ position: [0, 9, 12], near: 0.01, far: 500 }} onPointerMissed={() => setSelectedId(null)}>
                 <ambientLight intensity={1.2} />
                 <directionalLight position={[5, 8, 5]} intensity={1.0} />
@@ -370,6 +466,8 @@ export default function FloorPlan() {
                             color={STATUS_COLOR?.DEFAULT ?? "rgba(0,0,0,0.75)"}
                             selectedId={selectedId}
                             setSelected={setSelectedId}
+                            selectedSensor={replayOn ? selectedSensor : null}
+                            currentPoint={replayOn ? currentPoint : null}
                         />
                     ))}
 
