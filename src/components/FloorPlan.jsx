@@ -206,7 +206,16 @@ export default function FloorPlan() {
 
     /* -------------------------- UI LAYOUT -------------------------- */
     return (
-        <div className="h-screen w-screen bg-[#030d30] relative">
+        <div
+            style={{
+                position: "relative",
+                height: "100vh",
+                width: "100vw",
+                backgroundImage: "url(/BG.jpg)",   // put bg.jpg in /public
+                backgroundSize: "cover",
+                backgroundPosition: "center",
+            }}
+        >
             {/* top-left coordinate readout */}
             <div
                 style={{
@@ -439,6 +448,21 @@ export default function FloorPlan() {
                     Pick a room to run predictions.
                 </div>
             ) : null}
+
+            <img
+                src="/polish-cow-cow.gif"
+                alt="cow"
+                style={{
+                    position: "absolute",
+                    right: 12,
+                    bottom: 12,
+                    width: 96,          // tweak size as you like
+                    height: "auto",
+                    zIndex: 30,         // above the canvas UI
+                    pointerEvents: "none", // don’t block clicks on the scene
+                    filter: "drop-shadow(0 3px 8px rgba(0,0,0,0.4))",
+                }}
+            />
 
             {/* 3D scene */}
             <Canvas camera={{ position: [0, 9, 12], near: 0.01, far: 500 }} onPointerMissed={() => setSelectedId(null)}>
